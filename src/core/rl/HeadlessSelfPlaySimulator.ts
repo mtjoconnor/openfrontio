@@ -138,6 +138,11 @@ interface PlayerContext {
   actionContext: ActionEncodingContextV1;
 }
 
+interface AttackAdjacencySummary {
+  canAttackTerraNullius: boolean;
+  attackablePlayerIDs: Set<string>;
+}
+
 class HeadlessServerConfig extends DefaultServerConfig {
   // The simulator runs offline and does not need live server integrations.
   turnstileSiteKey(): string {
@@ -534,6 +539,11 @@ export class HeadlessSelfPlaySimulatorV1 {
   private buildTargetSlots(game: Game, self: Player): TargetSlotV1[] {
     const slots: TargetSlotV1[] = [];
     const canIssueCombat = self.isAlive() && self.hasSpawned() && !game.inSpawnPhase();
+    // Border adjacency is the expensive part; compute it once and reuse for
+    // terra-nullius + every player slot.
+    const attackAdjacency = canIssueCombat
+      ? this.computeAttackAdjacencySummary(game, self)
+      : null;
     slots.push({
       slot: 0,
       kind: "terra_nullius",
@@ -542,7 +552,7 @@ export class HeadlessSelfPlaySimulatorV1 {
       small_id: null,
       tiles_owned: 0,
       troops: 0,
-      can_attack: canIssueCombat && this.canAttackTarget(game, self, null),
+      can_attack: canIssueCombat && !!attackAdjacency?.canAttackTerraNullius,
       can_target: false,
       is_alive: true,
       is_friendly: false,
@@ -566,7 +576,8 @@ export class HeadlessSelfPlaySimulatorV1 {
         small_id: other.smallID(),
         tiles_owned: other.numTilesOwned(),
         troops: other.troops(),
-        can_attack: canIssueCombat && this.canAttackTarget(game, self, other),
+        can_attack:
+          canIssueCombat && !!attackAdjacency?.attackablePlayerIDs.has(other.id()),
         can_target: canIssueCombat && self.canTarget(other),
         is_alive: other.isAlive(),
         is_friendly: self.isFriendly(other, true),
@@ -575,10 +586,20 @@ export class HeadlessSelfPlaySimulatorV1 {
     return slots;
   }
 
-  private canAttackTarget(game: Game, self: Player, target: Player | null): boolean {
-    // "Attackable" here means there exists at least one legal border tile attack.
+  private computeAttackAdjacencySummary(
+    game: Game,
+    self: Player,
+  ): AttackAdjacencySummary {
+    // "Attackable" here means there exists at least one legal adjacent border
+    // tile attack. We intentionally avoid Player.canAttack(tile), because that
+    // method runs BFS for terra-nullius checks and gets very expensive at scale.
+    const summary: AttackAdjacencySummary = {
+      canAttackTerraNullius: false,
+      attackablePlayerIDs: new Set<string>(),
+    };
+
     if (!self.isAlive() || !self.hasSpawned() || game.inSpawnPhase()) {
-      return false;
+      return summary;
     }
 
     for (const borderTile of self.borderTiles()) {
@@ -586,22 +607,18 @@ export class HeadlessSelfPlaySimulatorV1 {
         if (!game.isLand(neighbor)) {
           continue;
         }
-        if (!self.canAttack(neighbor)) {
-          continue;
-        }
         const owner = game.owner(neighbor);
-        if (target === null) {
-          if (!owner.isPlayer()) {
-            return true;
-          }
+        if (!owner.isPlayer()) {
+          summary.canAttackTerraNullius = true;
           continue;
         }
-        if (owner.isPlayer() && owner.id() === target.id()) {
-          return true;
+        // Keep diplomacy/immunity rules exactly aligned with attack legality.
+        if (self.canAttackPlayer(owner)) {
+          summary.attackablePlayerIDs.add(owner.id());
         }
       }
     }
-    return false;
+    return summary;
   }
 
   private buildAttackSlots(self: Player): AttackSlotV1[] {
@@ -903,6 +920,11 @@ export class HeadlessSelfPlaySimulatorV1 {
   }
 
   private shouldTerminate(state: EnvironmentRuntimeState): boolean {
+    // Never terminate early during spawn phase; players may have queued spawn intents
+    // that only become active on the next tick.
+    if (state.game.inSpawnPhase()) {
+      return false;
+    }
     if (state.game.getWinner() !== null) {
       return true;
     }
