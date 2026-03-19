@@ -216,6 +216,9 @@ class HeuristicPolicy implements PolicyEngine {
           counts.set(null, (counts.get(null) ?? 0) + 1);
           continue;
         }
+        if (owner.id() === self.id()) {
+          continue;
+        }
         if (!self.canAttackPlayer(owner)) {
           continue;
         }
@@ -277,6 +280,11 @@ class IntentPacer {
     this.lastIntentTick = currentTick;
     this.sentAtMs.push(nowMs);
   }
+
+  reset(): void {
+    this.lastIntentTick = Number.NEGATIVE_INFINITY;
+    this.sentAtMs = [];
+  }
 }
 
 class BotRuntime {
@@ -287,12 +295,14 @@ class BotRuntime {
   private turnBuffer: Turn[] = [];
   private myClientID: string | null = null;
   private lastReceivedTurn = -1;
+  private turnsSeen = 0;
   private intentQueue: Intent[] = [];
   private readonly random: PseudoRandom;
   private readonly pacer: IntentPacer;
   private readonly heuristicPolicy = new HeuristicPolicy();
   private readonly primaryPolicy: PolicyEngine;
   private lastStatusTick = -1;
+  private connectionEpoch = 0;
 
   constructor(private readonly options: BotOptions) {
     this.random = new PseudoRandom(simpleHash(options.seed + options.gameID));
@@ -329,15 +339,21 @@ class BotRuntime {
       }
       this.ws = null;
     }
+    this.intentQueue = [];
+    this.pacer.reset();
   }
 
   private connectAndJoin(isRejoin: boolean): void {
+    const epoch = ++this.connectionEpoch;
     const wsUrl = this.getWsUrl();
     console.log(`[rl-bot] connecting: ${wsUrl}`);
     const ws = new WebSocket(wsUrl);
     this.ws = ws;
 
     ws.on("open", () => {
+      if (!this.isCurrentConnection(epoch, ws)) {
+        return;
+      }
       console.log(`[rl-bot] websocket open (rejoin=${isRejoin})`);
       this.startPing();
       if (isRejoin) {
@@ -348,6 +364,9 @@ class BotRuntime {
     });
 
     ws.on("message", (buffer) => {
+      if (!this.isCurrentConnection(epoch, ws)) {
+        return;
+      }
       const text = buffer.toString();
       let parsed: unknown;
       try {
@@ -367,8 +386,13 @@ class BotRuntime {
     });
 
     ws.on("close", (code, reason) => {
+      if (!this.isCurrentConnection(epoch, ws)) {
+        return;
+      }
       this.stopPing();
       console.warn(`[rl-bot] websocket closed code=${code} reason=${reason.toString()}`);
+      this.intentQueue = [];
+      this.pacer.reset();
       if (code === 1000) {
         return;
       }
@@ -377,8 +401,15 @@ class BotRuntime {
     });
 
     ws.on("error", (error) => {
+      if (!this.isCurrentConnection(epoch, ws)) {
+        return;
+      }
       console.error("[rl-bot] websocket error", error);
     });
+  }
+
+  private isCurrentConnection(epoch: number, ws: WebSocket): boolean {
+    return this.connectionEpoch === epoch && this.ws === ws;
   }
 
   private scheduleReconnect(): void {
@@ -437,47 +468,88 @@ class BotRuntime {
     }
     console.log(`[rl-bot] start received myClientID=${this.myClientID}`);
 
-    // createGameRunner expects client-style config fetch; emulate /api/env in Node.
-    const originalFetch = globalThis.fetch;
-    try {
-      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        if (typeof input === "string" && input === "/api/env") {
-          return new Response(JSON.stringify({ game_env: "dev" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return originalFetch(input as any, init);
-      };
+    // Build the runner once. On reconnect starts, keep the existing runner and
+    // only apply missed turns.
+    if (this.runner === null) {
+      // createGameRunner expects client-style config fetch; emulate /api/env in Node.
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (typeof input === "string" && input === "/api/env") {
+            return new Response(JSON.stringify({ game_env: "dev" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return originalFetch(input as any, init);
+        };
 
-      this.runner = await createGameRunner(
-        gameStartInfo,
-        this.myClientID,
-        new FilesystemGameMapLoader(),
-        () => {
-          // No renderer callback needed for external bot runtime.
-        },
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
+        this.runner = await createGameRunner(
+          gameStartInfo,
+          this.myClientID,
+          new FilesystemGameMapLoader(),
+          () => {
+            // No renderer callback needed for external bot runtime.
+          },
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      this.turnsSeen = 0;
+      this.lastStatusTick = -1;
     }
 
+    // Clear stale commands from disconnected windows before applying fresh turns.
+    this.intentQueue = [];
+    this.pacer.reset();
+
+    const replayTurns = [...turns, ...this.turnBuffer];
     this.turnBuffer = [];
-    for (const turn of turns) {
-      this.runner.addTurn(turn);
-      this.lastReceivedTurn = Math.max(this.lastReceivedTurn, turn.turnNumber);
-    }
+    this.ingestTurns(replayTurns);
     this.drainTurnsAndAct();
   }
 
   private onTurnMessage(turn: Turn): void {
-    this.lastReceivedTurn = Math.max(this.lastReceivedTurn, turn.turnNumber);
     if (!this.runner) {
       this.turnBuffer.push(turn);
       return;
     }
-    this.runner.addTurn(turn);
+    this.ingestTurn(turn);
     this.drainTurnsAndAct();
+  }
+
+  private ingestTurns(turns: Turn[]): void {
+    if (!this.runner || turns.length === 0) {
+      return;
+    }
+    const ordered = [...turns].sort((a, b) => a.turnNumber - b.turnNumber);
+    for (const turn of ordered) {
+      this.ingestTurn(turn);
+    }
+  }
+
+  private ingestTurn(turn: Turn): void {
+    if (!this.runner) {
+      return;
+    }
+    // Deduplicate old turns that can show up during reconnect/start replay.
+    if (turn.turnNumber < this.turnsSeen) {
+      this.lastReceivedTurn = Math.max(this.lastReceivedTurn, turn.turnNumber);
+      return;
+    }
+
+    // Keep turn numbers contiguous to mirror the client runtime behavior.
+    while (turn.turnNumber > this.turnsSeen) {
+      this.runner.addTurn({
+        turnNumber: this.turnsSeen,
+        intents: [],
+      });
+      this.turnsSeen++;
+    }
+
+    this.runner.addTurn(turn);
+    this.turnsSeen++;
+    this.lastReceivedTurn = Math.max(this.lastReceivedTurn, turn.turnNumber);
   }
 
   private drainTurnsAndAct(): void {
@@ -498,9 +570,7 @@ class BotRuntime {
     if (this.turnBuffer.length > 0) {
       const buffered = [...this.turnBuffer];
       this.turnBuffer = [];
-      for (const turn of buffered) {
-        this.runner.addTurn(turn);
-      }
+      this.ingestTurns(buffered);
       this.drainTurnsAndAct();
     }
   }
@@ -538,6 +608,9 @@ class BotRuntime {
     if (intent === null) {
       return;
     }
+    if (!this.isIntentValidForCurrentState(self, intent)) {
+      return;
+    }
     this.enqueueIntent(intent);
   }
 
@@ -570,6 +643,13 @@ class BotRuntime {
     if (!intent) {
       return;
     }
+    const self = this.runner.game.playerByClientID(this.myClientID ?? "");
+    if (!self || !self.isPlayer()) {
+      return;
+    }
+    if (!this.isIntentValidForCurrentState(self, intent)) {
+      return;
+    }
     const payload = {
       type: "intent",
       intent,
@@ -581,6 +661,58 @@ class BotRuntime {
     }
     this.ws.send(serialized);
     this.pacer.markSent(tick, nowMs);
+  }
+
+  private isIntentValidForCurrentState(self: Player, intent: Intent): boolean {
+    const game = this.runner?.game;
+    if (!game) {
+      return false;
+    }
+    switch (intent.type) {
+      case "spawn": {
+        if (!game.inSpawnPhase() || self.hasSpawned()) {
+          return false;
+        }
+        if (!game.isLand(intent.tile)) {
+          return false;
+        }
+        return getSpawnTiles(game, intent.tile, false).length > 0;
+      }
+      case "attack": {
+        if (game.inSpawnPhase() || !self.isAlive() || !self.hasSpawned()) {
+          return false;
+        }
+        if (intent.targetID === self.id()) {
+          return false;
+        }
+        if (
+          intent.troops === null ||
+          intent.troops < this.options.minAttackTroops ||
+          intent.troops > self.troops()
+        ) {
+          return false;
+        }
+        if (intent.targetID === null || intent.targetID === game.terraNullius().id()) {
+          return true;
+        }
+        if (!game.hasPlayer(intent.targetID)) {
+          return false;
+        }
+        const target = game.player(intent.targetID);
+        return target.isPlayer() && self.canAttackPlayer(target);
+      }
+      case "cancel_attack":
+        return self
+          .outgoingAttacks()
+          .some((attack) => attack.id() === intent.attackID && attack.isActive());
+      case "targetPlayer":
+        if (intent.target === self.id() || !game.hasPlayer(intent.target)) {
+          return false;
+        }
+        return self.canTarget(game.player(intent.target));
+      default:
+        return true;
+    }
   }
 
   private async createPrivateGame(): Promise<void> {
