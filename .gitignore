@@ -18,3 +18,9 @@ src/assets/
 *.log
 *debug*.txt
 eslint_out.txt
+
+# Python RL artifacts
+.venv/
+__pycache__/
+*.pyc
+rl/python/checkpoints/
