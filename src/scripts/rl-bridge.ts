@@ -19,6 +19,8 @@ type BridgeOptions = {
   players: number;
   maxTicks: number;
   seed: number;
+  nations: GameConfig["nations"];
+  bots: number;
   suppressNoncriticalWarnings: boolean;
 };
 
@@ -82,6 +84,8 @@ function parseArgs(argv: string[]): BridgeOptions {
     players: clampInt(get("--players", "4"), 2, 24),
     maxTicks: clampInt(get("--max-ticks", "3000"), 1, 10_000_000),
     seed: clampInt(get("--seed", "1337"), 0, Number.MAX_SAFE_INTEGER),
+    nations: parseNationsArg(get("--nations", "disabled")),
+    bots: clampInt(get("--bots", "0"), 0, 400),
     suppressNoncriticalWarnings: !argv.includes("--show-noncritical-warnings"),
   };
 }
@@ -92,6 +96,20 @@ function clampInt(value: string, min: number, max: number): number {
     return min;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function parseNationsArg(value: string): GameConfig["nations"] {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default" || normalized === "disabled") {
+    return normalized;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(
+      `Invalid --nations value "${value}". Use "disabled", "default", or an integer 1-400.`,
+    );
+  }
+  return clampInt(normalized, 1, 400);
 }
 
 function makePlayers(count: number): SelfPlayPlayerConfigV1[] {
@@ -106,7 +124,7 @@ function makePlayers(count: number): SelfPlayPlayerConfigV1[] {
   return players;
 }
 
-function makeGameConfig(): GameConfig {
+function makeGameConfig(options: BridgeOptions): GameConfig {
   return {
     gameMap: GameMapType.BosphorusStraits,
     gameMapSize: GameMapSize.Compact,
@@ -115,8 +133,8 @@ function makeGameConfig(): GameConfig {
     donateTroops: false,
     gameType: GameType.Singleplayer,
     gameMode: GameMode.FFA,
-    nations: "disabled",
-    bots: 0,
+    nations: options.nations,
+    bots: options.bots,
     infiniteGold: false,
     infiniteTroops: false,
     instantBuild: false,
@@ -192,7 +210,7 @@ async function main(): Promise<void> {
   installStderrConsoleRouting(options.suppressNoncriticalWarnings);
   const players = makePlayers(options.players);
   const simulator = new HeadlessSelfPlaySimulatorV1({
-    game_config: makeGameConfig(),
+    game_config: makeGameConfig(options),
     map_loader: new FilesystemGameMapLoader(),
     players,
     controlled_client_ids: players.map((p) => p.client_id),
@@ -228,6 +246,8 @@ async function main(): Promise<void> {
             players: options.players,
             max_ticks: options.maxTicks,
             seed: options.seed,
+            nations: options.nations,
+            bots: options.bots,
           },
         });
         return;

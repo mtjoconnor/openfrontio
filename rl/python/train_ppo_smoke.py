@@ -85,6 +85,8 @@ class PPOConfig:
     max_grad_norm: float
     players: int
     max_ticks: int
+    nations: str
+    bots: int
     seed: int
     observation_mode: str
     log_every: int
@@ -111,6 +113,12 @@ def parse_args() -> PPOConfig:
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--players", type=int, default=4)
     parser.add_argument("--max-ticks", type=int, default=300)
+    parser.add_argument(
+        "--nations",
+        default="disabled",
+        help='Nation config for bridge env: "disabled", "default", or integer count (1-400)',
+    )
+    parser.add_argument("--bots", type=int, default=0)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument(
         "--observation-mode", choices=["student", "teacher"], default="student"
@@ -129,6 +137,7 @@ def parse_args() -> PPOConfig:
 
     args = parser.parse_args()
     bridge_command = shlex.split(args.bridge_cmd) if args.bridge_cmd.strip() else None
+    nations = parse_nations_arg(args.nations)
     return PPOConfig(
         updates=max(1, args.updates),
         rollout_steps=max(8, args.rollout_steps),
@@ -143,6 +152,8 @@ def parse_args() -> PPOConfig:
         max_grad_norm=float(args.max_grad_norm),
         players=max(2, args.players),
         max_ticks=max(1, args.max_ticks),
+        nations=nations,
+        bots=max(0, min(400, args.bots)),
         seed=max(0, args.seed),
         observation_mode=args.observation_mode,
         log_every=max(1, args.log_every),
@@ -153,6 +164,19 @@ def parse_args() -> PPOConfig:
         eval_every=max(0, args.eval_every),
         eval_episodes=max(1, args.eval_episodes),
     )
+
+
+def parse_nations_arg(raw: str) -> str:
+    normalized = str(raw).strip().lower()
+    if normalized in {"disabled", "default"}:
+        return normalized
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            f'Invalid --nations value "{raw}". Use "disabled", "default", or integer 1-400.'
+        ) from exc
+    return str(max(1, min(400, parsed)))
 
 
 def compute_gae(batch: Dict[str, np.ndarray], cfg: PPOConfig) -> Tuple[np.ndarray, np.ndarray]:
@@ -464,12 +488,18 @@ def main() -> None:
     bridge_cmd = (
         list(cfg.bridge_command)
         if cfg.bridge_command is not None
-        else default_bridge_command(cfg.players, cfg.max_ticks, cfg.seed)
+        else default_bridge_command(
+            cfg.players,
+            cfg.max_ticks,
+            cfg.seed,
+            nations=cfg.nations,
+            bots=cfg.bots,
+        )
     )
     print(
         "[ppo-smoke] starting "
         f"updates={cfg.updates} rollout_steps={cfg.rollout_steps} "
-        f"players={cfg.players} max_ticks={cfg.max_ticks} seed={cfg.seed}"
+        f"players={cfg.players} max_ticks={cfg.max_ticks} nations={cfg.nations} bots={cfg.bots} seed={cfg.seed}"
     )
     print(f"[ppo-smoke] bridge_cmd={' '.join(bridge_cmd)}")
 

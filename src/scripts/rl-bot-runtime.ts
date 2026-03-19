@@ -77,6 +77,10 @@ interface PolicyEngine {
   chooseIntent(ctx: PolicyContext): Intent | null;
 }
 
+// `null` is a valid attack target (terra nullius). We use `undefined` to mean
+// "no legal target found" so wilderness expansion isn't dropped accidentally.
+type AttackTargetID = string | null;
+
 class UnsupportedCheckpointPolicy implements PolicyEngine {
   constructor(private readonly modelPath: string | null) {}
 
@@ -136,7 +140,7 @@ class HeuristicPolicy implements PolicyEngine {
       random.next() <= options.attackChance
     ) {
       const target = this.pickAttackTarget(runner, self, random);
-      if (target !== null) {
+      if (target !== undefined) {
         const ratio = random.randElement([0.1, 0.2, 0.33, 0.5, 0.75]);
         const troops = Math.floor(self.troops() * ratio);
         if (troops >= options.minAttackTroops) {
@@ -201,9 +205,9 @@ class HeuristicPolicy implements PolicyEngine {
     runner: GameRunner,
     self: Player,
     random: PseudoRandom,
-  ): string | null {
+  ): AttackTargetID | undefined {
     const game = runner.game;
-    const counts = new Map<string | null, number>();
+    const counts = new Map<AttackTargetID, number>();
 
     // Build attackability from direct border adjacency in O(border) time.
     for (const borderTile of self.borderTiles()) {
@@ -227,7 +231,7 @@ class HeuristicPolicy implements PolicyEngine {
     }
 
     if (counts.size === 0) {
-      return null;
+      return undefined;
     }
 
     // Prefer stronger adjacency pressure; break ties with randomness.

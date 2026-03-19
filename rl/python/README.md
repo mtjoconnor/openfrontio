@@ -46,3 +46,23 @@ Checkpoints and eval snapshots are written to:
 
 - `rl/python/checkpoints/*.pt`
 - `rl/python/checkpoints/eval_history.jsonl`
+
+## Train Against Nations
+
+You can include inbuilt nations directly in the headless bridge env:
+
+```bash
+python3 rl/python/train_ppo_smoke.py \
+  --updates 100 \
+  --rollout-steps 1024 \
+  --players 4 \
+  --max-ticks 1200 \
+  --nations default \
+  --bots 0
+```
+
+`--nations` supports:
+
+- `disabled`
+- `default`
+- an explicit count (`1` to `400`)

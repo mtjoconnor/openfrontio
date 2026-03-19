@@ -29,7 +29,13 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def default_bridge_command(players: int, max_ticks: int, seed: int) -> List[str]:
+def default_bridge_command(
+    players: int,
+    max_ticks: int,
+    seed: int,
+    nations: str = "disabled",
+    bots: int = 0,
+) -> List[str]:
     # Use direct Node invocation instead of `npm run` so stdout remains pure
     # NDJSON protocol (npm adds banner lines that break JSON parsing).
     return [
@@ -43,6 +49,10 @@ def default_bridge_command(players: int, max_ticks: int, seed: int) -> List[str]
         str(max_ticks),
         "--seed",
         str(seed),
+        "--nations",
+        str(nations),
+        "--bots",
+        str(bots),
     ]
 
 
@@ -122,6 +132,8 @@ class OpenFrontSelfPlayEnv:
         players: int = 4,
         max_ticks: int = 3_000,
         seed: int = 1337,
+        nations: str = "disabled",
+        bots: int = 0,
         observation_mode: str = "student",
         bridge_command: Optional[Sequence[str]] = None,
         controlled_client_id: Optional[str] = None,
@@ -137,7 +149,13 @@ class OpenFrontSelfPlayEnv:
         command = (
             list(bridge_command)
             if bridge_command is not None
-            else default_bridge_command(players, max_ticks, seed)
+            else default_bridge_command(
+                players,
+                max_ticks,
+                seed,
+                nations=nations,
+                bots=bots,
+            )
         )
         self.bridge = OpenFrontRLBridge(
             BridgeConfig(command=command, cwd=str(repo_root()))
